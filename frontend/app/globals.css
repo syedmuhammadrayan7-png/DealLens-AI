@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { --ink:#10151d; --navy:#07111f; --line:rgba(194,215,232,.16); --cyan:#4ed8ff; --ivory:#f4f2eb; }
+* { box-sizing: border-box; }
+body { margin:0; color:var(--ivory); background:var(--navy); font-family: Arial, Helvetica, sans-serif; }
+a { color:inherit; text-decoration:none; }
+.shell { max-width:1180px; margin:auto; padding:0 28px; }
+.grid-bg { background-image:linear-gradient(rgba(115,179,210,.055) 1px, transparent 1px),linear-gradient(90deg,rgba(115,179,210,.055) 1px,transparent 1px); background-size:52px 52px; }
+.glass { background:rgba(18,31,47,.72); border:1px solid var(--line); box-shadow:0 22px 60px rgba(0,0,0,.22); }
+.eyebrow { color:var(--cyan); text-transform:uppercase; letter-spacing:.14em; font-size:.7rem; font-weight:700; }
+.button { display:inline-flex; align-items:center; gap:.5rem; padding:.8rem 1rem; border-radius:.35rem; background:var(--cyan); color:#06111f; font-weight:700; }
+.button.secondary { background:transparent; border:1px solid var(--line); color:var(--ivory); }
+input, select { width:100%; padding:.75rem; color:var(--ivory); background:#101c2c; border:1px solid var(--line); border-radius:.3rem; }
+label { display:block; color:#9fb1c2; font-size:.75rem; margin-bottom:.4rem; }
