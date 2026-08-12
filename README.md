@@ -21,12 +21,39 @@ flowchart LR
 flowchart LR
   UI[Next.js frontend] --> API[FastAPI API]
   API --> DB[(Supabase PostgreSQL)]
-  Worker[PostgreSQL worker] --> DB
+  Worker[Render worker web service] --> DB
   Worker --> AI[CrewAI / OpenAI / MCP / GitHub]
   UI -->|polls| API
 ```
 
-The API persists a case and queued job, then returns immediately. Run the worker separately with `python -m backend.worker`; it claims one PostgreSQL job atomically and performs the long-running workflow. Report/PDF reads use stored report data and never rerun AI.
+The API persists a case and queued job, then returns immediately. The worker claims one PostgreSQL job atomically and performs the long-running workflow. Report/PDF reads use stored report data and never rerun AI.
+
+### Free-tier Render deployment
+
+```text
+Vercel
+  -> Next.js frontend
+Render Web Service #1
+  -> FastAPI API (`uvicorn backend.main:app --host 0.0.0.0 --port $PORT`)
+Render Web Service #2
+  -> `python -m backend.worker_service`
+  -> lightweight HTTP health server plus the durable PostgreSQL worker loop
+Supabase PostgreSQL
+  -> cases / jobs / reports / evidence
+```
+
+The second Render **Web Service** is a free-tier workaround for platforms that require every service to bind to `$PORT`. It exposes only `GET /` and `GET /health`, returning `{"status":"ok","service":"deallens-worker"}`. Its worker thread reuses `backend.worker.run_worker`, including atomic `FOR UPDATE SKIP LOCKED` claims, retries, report persistence, and stale-job recovery; it does not implement a second queue.
+
+Set `PORT` only when running locally (the local default is `10000`), then run:
+
+```powershell
+$env:PORT="10000"
+.\.venv\Scripts\python.exe -m backend.worker_service
+```
+
+Configure the worker service with the same backend-only environment variables as the API: `DATABASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `APP_ENV`, `WORKER_POLL_SECONDS`, `JOB_STALE_MINUTES`, `JOB_MAX_ATTEMPTS`, `OPENAI_TIMEOUT_SECONDS`, `OPENAI_MAX_RETRIES`, `DEALLENS_CACHE_TTL_SECONDS`, `DEALLENS_MAX_PITCH_DECK_MB`, and optionally `GITHUB_TOKEN`. Do not expose them to Vercel.
+
+On SIGTERM/Ctrl+C, Uvicorn closes the HTTP service and the lifespan handler requests that polling stop. It never marks an in-progress job completed; an interrupted active job remains durable and is handled by existing stale-job recovery after its lease timeout. A free Render web service can still sleep or be restarted, so queue latency and recovery time are not suitable for low-latency or always-on production workloads. Multiple accidental worker instances are safe with respect to duplicate execution because PostgreSQL job claiming uses row locking and `SKIP LOCKED`.
 
 CrewAI owns specialist-agent orchestration and bounded flow routing. MCP owns reusable integrations: deterministic finance tools, diligence frameworks as resources, and an investment-committee memo prompt. The flow allows at most one targeted retry before risk synthesis.
 
@@ -97,7 +124,7 @@ npm run build
 
 ## Evidence, security, and current MVP limits
 
-Evidence is classified as verified, supported, founder-provided, unverified, conflicting, or unavailable. GitHub lookup validates public repository URLs, fetches metadata/activity/contributors/releases when available, uses a TTL cache, and has strict retry/backoff behavior. Public website research is a low-friction optional source; inaccessible sites become unavailable evidence. API keys remain server-side; `.env` is git-ignored. The MVP job runner is in-memory, so active cases do not survive a process restart; replace it with a durable queue/store before deployment.
+Evidence is classified as verified, supported, founder-provided, unverified, conflicting, or unavailable. GitHub lookup validates public repository URLs, fetches metadata/activity/contributors/releases when available, uses a TTL cache, and has strict retry/backoff behavior. Public website research is a low-friction optional source; inaccessible sites become unavailable evidence. API keys remain server-side; `.env` is git-ignored. Jobs, cases, reports, score breakdowns, and evidence are durably stored in PostgreSQL.
 
 ## Roadmap
 
