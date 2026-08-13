@@ -1,6 +1,7 @@
 """Bounded stateful orchestration for a real CrewAI diligence run."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -33,6 +34,7 @@ class DueDiligenceState:
     iteration: int = 0
     max_iterations: int = 1
     evidence_quality: float = 0.0
+    evidence_count: int = 0
     company_findings: Any = None
     market_findings: Any = None
     technical_findings: Any = None
@@ -57,9 +59,15 @@ class DueDiligenceFlow:
         self.github, self.research = GitHubService(cache, token=token), WebsiteResearchService(cache)
 
     def _context(self, case: StartupInput, state: DueDiligenceState) -> dict[str, Any]:
+        state.status = "company_research"
         self.update("company_research", {"Company Intelligence": "running"})
         website = self.research.inspect(str(case.website) if case.website else None)
-        self.update("technical_analysis", {"Company Intelligence": "completed", "Technical Due Diligence": "running"})
+        state.status = "market_analysis"
+        self.update("market_analysis", {"Company Intelligence": "completed", "Market Analysis": "running"})
+        # The current bounded market task uses supplied public context only;
+        # mark it truthfully complete before dependent technical work begins.
+        state.status = "technical_analysis"
+        self.update("technical_analysis", {"Market Analysis": "completed", "Technical Due Diligence": "running"})
         if case.github_url:
             try:
                 github: dict[str, Any] = self.github.inspect(str(case.github_url))
@@ -67,12 +75,14 @@ class DueDiligenceFlow:
                 github = {"status": "unavailable", "reason": str(exc)}
         else:
             github = {"status": "unavailable", "reason": "No GitHub URL was supplied."}
+        state.status = "financial_analysis"
         self.update("financial_analysis", {"Technical Due Diligence": "completed", "Financial Analysis": "running"})
         finance_values = case.financial_inputs.model_dump()
         try:
             finance = FinanceMCPClient().financial_metrics(finance_values)
         except MCPUnavailableError as exc:
             finance = {"status": "unavailable", "reason": str(exc)}
+        state.evidence_count = int(website.get("status") != "unavailable") + int(github.get("status") != "unavailable")
         return {"case_id": state.case_id, "company_name": case.company_name, "website": str(case.website) if case.website else None, "sector": case.sector, "funding_stage": case.funding_stage, "funding_requested": case.funding_requested, "github_url": str(case.github_url) if case.github_url else None, "website_research": website, "github": github, "financial_inputs": finance_values, "finance_mcp": finance, "pitch_deck": {"status": "founder-provided", "text": case.pitch_deck_text} if case.pitch_deck_text else {"status": "unavailable", "reason": "No pitch deck supplied."}}
 
     @staticmethod
@@ -86,14 +96,21 @@ class DueDiligenceFlow:
         # Fail locally before OpenAI is called if the CrewAI-generated strict schema is invalid.
         crewai_strict_schema(DueDiligenceReport)
         context = self._context(case, state)
+        # `evidence_json` is interpolated as a value. It is deliberately not
+        # embedded in a task template: public web text can contain `{...}`
+        # snippets that CrewAI would otherwise treat as missing variables.
+        context["evidence_json"] = json.dumps(context, default=str, indent=2)
         state.evidence_quality = self._quality(context)
-        self.update("evidence_review", {"Financial Analysis": "completed"})
+        state.status = "evidence_review"
+        self.update("evidence_review", {"Financial Analysis": "completed"}, state.evidence_count)
         # A low-quality first pass only enriches the same public context once; it never loops indefinitely.
         if state.should_targeted_retry():
             state.iteration += 1
             context["targeted_retry"] = "Re-check only evidence gaps; no unsupported claims."
+        state.status = "risk_committee"
         self.update("risk_committee", {"Risk Committee": "running"})
         crew = create_due_diligence_crew(self.settings, context)
+        state.status = "investment_memo"
         self.update("investment_memo", {"Risk Committee": "completed", "Investment Memo": "running"})
         output = crew.kickoff(inputs=context)
         report = getattr(output, "pydantic", None)

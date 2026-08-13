@@ -7,13 +7,18 @@ from typing import Any
 from backend.schemas.case import DueDiligenceReport
 
 
+def escape_task_evidence(context: dict[str, Any]) -> str:
+    """Serialize evidence for an interpolated value, never a task template."""
+    return json.dumps(context, default=str, indent=2)
+
+
 def build_tasks(agents: dict[str, Any], context: dict[str, Any]):
     from crewai import Task
 
-    evidence = json.dumps(context, default=str, indent=2)
     company = Task(
         description=f"""Create a company-research finding for {context['company_name']}.
-Use only this supplied evidence: {evidence}
+Use only the supplied evidence JSON below:
+{{evidence_json}}
 Return product summary, public company information, public-company claims, founder-provided claims, and evidence labels.
 Claims from the company website must be public_company_claim, not founder_provided. Founder_provided is reserved for an uploaded pitch deck, manually supplied financial inputs, or founder notes.
 Never present an unavailable source or an inference as verified.""",

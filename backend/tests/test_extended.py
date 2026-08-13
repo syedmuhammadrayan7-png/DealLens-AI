@@ -8,6 +8,7 @@ from backend.main import app
 from backend.mcp.servers.finance_server import PRESEED_FRAMEWORK, RISK_POLICY, SAAS_METRICS
 from backend.mcp.clients import FinanceMCPClient
 from backend.crew.schema_validation import StructuredOutputSchemaError, crewai_strict_schema, validate_strict_schema
+from backend.crew.tasks import escape_task_evidence
 from backend.services.cases import CaseManager
 from backend.services.pdf import render_report_pdf
 from backend.services.scoring import calculate_score_breakdowns, recommendation_for
@@ -136,6 +137,22 @@ def test_crewai_strict_report_schema_is_internally_consistent():
 def test_schema_validator_rejects_phantom_required_key():
     with pytest.raises(StructuredOutputSchemaError):
         validate_strict_schema({"type": "object", "properties": {}, "required": ["agent_status"], "additionalProperties": False})
+
+
+def test_public_evidence_braces_are_escaped_for_crewai_task_interpolation():
+    context = {"case_id": "case-1", "company_name": "Weights & Biases", "sector": "AI Infrastructure", "funding_stage": "Growth", "website_research": {"excerpt": "window.{search_term_string}"}}
+    assert "{search_term_string}" in escape_task_evidence(context)
+
+
+def test_historical_score_factor_without_max_points_reconstructs():
+    report = DueDiligenceReport.model_validate({
+        "company_name": "Historical", "sector": "SaaS", "funding_stage": "Seed", "overall_score": 50,
+        "market_score": 50, "technical_score": 50, "traction_score": 50, "financial_score": 50, "team_score": 50,
+        "risk_level": "Moderate", "confidence_level": "Low", "investment_thesis": "Historical record.", "strengths": [], "red_flags": [],
+        "verified_evidence": [], "unverified_claims": [], "investor_questions": [], "additional_verification_required": [], "recommendation": "Proceed with Conditions",
+        "score_breakdowns": [{"category": "Technology", "score": 50, "confidence": "Medium", "contributing_factors": [{"label": "Old factor", "points": 8, "note": "Old record."}], "deductions": [], "evidence_summary": ["Old record."]}],
+    })
+    assert report.score_breakdowns[0].contributing_factors[0].max_points == 0
 
 
 def test_case_becomes_terminal_failed_on_schema_error(monkeypatch):

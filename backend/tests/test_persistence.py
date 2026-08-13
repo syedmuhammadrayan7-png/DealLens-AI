@@ -1,8 +1,10 @@
 """Repository tests use a fake repository; they never touch the live Supabase database."""
 from datetime import datetime, timezone
 
-from backend.schemas.case import CaseStatus, DueDiligenceReport, Recommendation, RiskLevel, StartupInput
+from backend.schemas.case import CaseStatus, DueDiligenceReport, Evidence, EvidenceStatus, Recommendation, RiskLevel, ScoreBreakdown, ScoreFactor, StartupInput
 from backend.services.cases import CaseManager
+from backend.persistence.repositories.jobs import Job
+import logging
 
 
 class FakeRepository:
@@ -83,3 +85,49 @@ def test_manual_retry_has_fresh_case_and_fresh_job():
     m=manager(); old=m.create(case()); old.status.status="failed"; m.repository.update_status(old.status.case_id,old.status)
     retry=m.retry(old.status.case_id); job=m.enqueue(retry.status.case_id)
     assert retry.status.case_id != old.status.case_id and job.case_id == retry.status.case_id
+
+
+def test_public_evidence_count_updates_before_final_memo():
+    m = manager(); record = m.create(case())
+    m._update(record.status.case_id, "evidence_review", {"Market Analysis": "completed"}, evidence_count=2)
+    assert m.get(record.status.case_id).status.evidence_count == 2
+    assert m.get(record.status.case_id).status.agent_status["Market Analysis"] == "completed"
+
+
+def test_workflow_failure_logs_diagnostics_but_persists_safe_error(monkeypatch, caplog):
+    m = manager(); record = m.create(case())
+    class FailingFlow:
+        def __init__(self, *_args, **_kwargs): pass
+        def run(self, *_args, **_kwargs): raise ValueError("internal interpolation failure")
+    monkeypatch.setattr("backend.services.cases.DueDiligenceFlow", FailingFlow)
+    with caplog.at_level(logging.ERROR, logger="deallens.cases"):
+        m.run(record.status.case_id, Job("job-1", record.status.case_id, "running", "investment_memo", 1, 2))
+    status = m.get(record.status.case_id).status
+    assert status.errors == ["DILIGENCE_WORKFLOW_ERROR"]
+    assert "case_id=" in caplog.text and "exception_type=ValueError" in caplog.text
+    assert "internal interpolation failure" not in status.errors[0]
+
+
+def test_wandb_like_workflow_completes_with_evidence_and_granular_scorecards(monkeypatch):
+    m = manager(); record = m.create(case("Weights & Biases"))
+    completed_report = report(record.status.case_id)
+    completed_report.verified_evidence = []
+    completed_report.unavailable_evidence = []
+    completed_report.founder_provided_claims = []
+    completed_report.verified_evidence.extend([
+        Evidence(statement="Public website was accessible.", status=EvidenceStatus.PUBLIC_COMPANY_CLAIM, confidence=70),
+        Evidence(statement="GitHub metadata was retrieved.", status=EvidenceStatus.VERIFIED, confidence=95),
+    ])
+    completed_report.score_breakdowns = [ScoreBreakdown(category="Technology", score=93, confidence="High", contributing_factors=[ScoreFactor(label="Commit recency", points=18, max_points=18, note="Recent activity.")])]
+    class SuccessfulFlow:
+        def __init__(self, _settings, update): self.update = update
+        def run(self, _case, _state):
+            self.update("market_analysis", {"Market Analysis": "completed"}, 2)
+            return completed_report
+    monkeypatch.setattr("backend.services.cases.DueDiligenceFlow", SuccessfulFlow)
+    m.run(record.status.case_id, Job("job-1", record.status.case_id, "running", "investment_memo", 1, 2))
+    saved = m.get(record.status.case_id)
+    assert saved and saved.status.status == "completed"
+    assert saved.status.evidence_count == 2
+    assert all(value == "completed" for value in saved.status.agent_status.values())
+    assert saved.report and saved.report.score_breakdowns[0].contributing_factors[0].max_points == 18

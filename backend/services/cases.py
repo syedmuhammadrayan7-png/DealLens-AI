@@ -1,6 +1,7 @@
 """Durable case lifecycle service backed by the case repository."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from backend.config import Settings
@@ -9,6 +10,8 @@ from backend.crew.flow import AGENT_NAMES, DueDiligenceFlow, DueDiligenceState
 from backend.persistence.repositories.cases import CaseRepository
 from backend.persistence.repositories.jobs import Job, JobRepository
 from backend.schemas.case import CaseStatus, DueDiligenceReport, StartupInput
+
+logger = logging.getLogger("deallens.cases")
 
 
 @dataclass
@@ -36,7 +39,7 @@ class CaseManager:
             return None
         return CaseRecord(case=case, status=status, report=self.repository.get_report(case_id))
 
-    def _update(self, case_id: str, stage: str, agents: dict[str, str] | None = None, job_id: str | None = None) -> None:
+    def _update(self, case_id: str, stage: str, agents: dict[str, str] | None = None, evidence_count: int | None = None, job_id: str | None = None) -> None:
         record = self.get(case_id)
         if record is None:
             return
@@ -45,6 +48,8 @@ class CaseManager:
         status.current_stage = stage
         if agents:
             status.agent_status.update(agents)
+        if evidence_count is not None:
+            status.evidence_count = evidence_count
         stages = ["validating", "company_research", "market_analysis", "technical_analysis", "financial_analysis", "evidence_review", "risk_committee", "investment_memo"]
         status.completed_stages = stages[:stages.index(stage)] if stage in stages else stages
         status.completion_percentage = min(95, round((len(status.completed_stages) / len(stages)) * 100))
@@ -70,7 +75,7 @@ class CaseManager:
         case = record.case
         state = DueDiligenceState(case_id=case_id, company_name=case.company_name, website=str(case.website) if case.website else None, industry=case.sector, funding_stage=case.funding_stage, funding_requested=case.funding_requested, github_url=str(case.github_url) if case.github_url else None, financial_inputs=case.financial_inputs.model_dump(), pitch_deck_text=case.pitch_deck_text)
         try:
-            report = DueDiligenceFlow(self.settings, lambda stage, agents=None: self._update(case_id, stage, agents, job.job_id if job else None)).run(case, state)
+            report = DueDiligenceFlow(self.settings, lambda stage, agents=None, evidence_count=None: self._update(case_id, stage, agents, evidence_count, job.job_id if job else None)).run(case, state)
             # Persist report first. A case cannot be completed without durable report storage.
             self.repository.persist_report(report)
             final = self.repository.get_status(case_id)
@@ -82,6 +87,16 @@ class CaseManager:
             self.repository.update_status(case_id, final)
             if job: self.jobs.complete(job.job_id)
         except Exception as exc:
+            # Full diagnostics are server-side only. Persisted/API-visible
+            # errors remain deliberately generic and never include exception
+            # text, credentials, connection strings, or pitch-deck content.
+            logger.exception(
+                "Diligence workflow failed case_id=%s job_id=%s current_stage=%s exception_type=%s",
+                case_id,
+                job.job_id if job else None,
+                state.status,
+                type(exc).__name__,
+            )
             failed = self.repository.get_status(case_id)
             if failed:
                 failed.status, failed.current_stage, failed.completion_percentage = "failed", "failed", 100
