@@ -44,6 +44,19 @@ def test_finance_mcp_client_calls_server_over_stdio():
     assert FinanceMCPClient().call_tool("calculate_runway", cash_available=120_000, monthly_burn=10_000) == 12.0
 
 
+def test_finance_metrics_only_calculates_available_inputs(monkeypatch):
+    client = FinanceMCPClient()
+    calls = []
+    def call(name, **values):
+        calls.append(name)
+        return {"arpu": 100, "net_cash_flow": 50} if name == "calculate_basic_unit_economics" else 12.0
+    monkeypatch.setattr(client, "call_tool", call)
+    metrics = client.financial_metrics({"monthly_revenue": 150, "monthly_burn": 100, "cash_available": 1200, "customers": 2, "previous_monthly_revenue": None, "largest_customer_revenue": None})
+    assert metrics["runway_months"] == 12.0
+    assert metrics["revenue_growth_pct"] is None and metrics["customer_concentration_pct"] is None
+    assert calls == ["calculate_basic_unit_economics", "calculate_runway"]
+
+
 def test_github_url_parsing_and_unavailable_path():
     service = GitHubService(TTLCache())
     with pytest.raises(Exception):

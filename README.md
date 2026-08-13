@@ -57,6 +57,14 @@ On SIGTERM/Ctrl+C, Uvicorn closes the HTTP service and the lifespan handler requ
 
 CrewAI owns specialist-agent orchestration and bounded flow routing. MCP owns reusable integrations: deterministic finance tools, diligence frameworks as resources, and an investment-committee memo prompt. The flow allows at most one targeted retry before risk synthesis.
 
+## Deterministic scoring
+
+CrewAI classifies evidence and writes the narrative; it does not set the final numeric scores. `backend/services/scoring.py` converts inspectable research facts and classified evidence into bounded 0–100 scorecards. Overall category weights are Market **20%**, Technology **20%**, Traction **25%**, Financials **20%**, and Team **15%**.
+
+Technology uses repository recency, recent commit depth, contributor ranges, releases, repository age, logarithmically scaled stars/forks, language, license, and a contextual issue flag. Market treats a company website as limited positioning evidence and prioritizes independent market and competitor signals. Traction distinguishes founder-supplied revenue/customers, capped public adoption, and independently supported commercial or growth evidence. Financials score only actual revenue, burn, cash/runway, growth, ARPU, concentration, and cash-flow inputs: Finance MCP availability alone earns **zero** points. Team separates public presence, named people, independently verifiable backgrounds, experience, and complementarity.
+
+Each scorecard reports factor points/max points, deductions, evidence notes, and a separate confidence level based on coverage and independent support. Recommendation combines the weighted score with confidence, unavailable/conflicting evidence, red flags, and critical gaps in traction, financials, and team—not score alone. Historical persisted reports continue to load because the new factor maximum is optional-compatible.
+
 ## OpenAI configuration
 
 All CrewAI agents use the same cost-efficient model, configured centrally in `backend/config.py`. The API key is read **only** from the backend process environment or local `.env`; it is never included in frontend code or API responses.

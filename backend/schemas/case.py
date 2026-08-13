@@ -32,6 +32,7 @@ class Evidence(BaseModel):
 class ScoreFactor(BaseModel):
     label: str
     points: int
+    max_points: int = Field(default=0, ge=0)
     note: str
     evidence_refs: list[str] = Field(default_factory=list)
 

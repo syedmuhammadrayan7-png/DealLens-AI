@@ -53,7 +53,14 @@ class FinanceMCPClient:
         return asyncio.run(self._call_async(tool_name, arguments))
 
     def financial_metrics(self, values: dict[str, Any]) -> dict[str, float | None]:
-        result = self.call_tool("calculate_basic_unit_economics", **values)
+        result = self.call_tool("calculate_basic_unit_economics", monthly_revenue=values.get("monthly_revenue"), monthly_burn=values.get("monthly_burn"), customers=values.get("customers"))
         if not isinstance(result, dict):
             raise MCPUnavailableError("Finance MCP returned an invalid metrics payload.")
-        return result
+        # The MCP server remains the calculation authority. Only call a tool
+        # when all of its required source inputs are present, so availability
+        # never masquerades as financial quality.
+        metrics: dict[str, float | None] = dict(result)
+        metrics["runway_months"] = self.call_tool("calculate_runway", cash_available=values.get("cash_available"), monthly_burn=values.get("monthly_burn")) if values.get("cash_available") is not None and values.get("monthly_burn") is not None else None
+        metrics["revenue_growth_pct"] = self.call_tool("calculate_revenue_growth", current=values.get("monthly_revenue"), previous=values.get("previous_monthly_revenue")) if values.get("monthly_revenue") is not None and values.get("previous_monthly_revenue") is not None else None
+        metrics["customer_concentration_pct"] = self.call_tool("calculate_customer_concentration", largest_customer_revenue=values.get("largest_customer_revenue"), monthly_revenue=values.get("monthly_revenue")) if values.get("largest_customer_revenue") is not None and values.get("monthly_revenue") is not None else None
+        return metrics

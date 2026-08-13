@@ -70,7 +70,7 @@ class DueDiligenceFlow:
         self.update("financial_analysis", {"Technical Due Diligence": "completed", "Financial Analysis": "running"})
         finance_values = case.financial_inputs.model_dump()
         try:
-            finance = FinanceMCPClient().financial_metrics({"monthly_revenue": finance_values.get("monthly_revenue"), "monthly_burn": finance_values.get("monthly_burn"), "customers": finance_values.get("customers")})
+            finance = FinanceMCPClient().financial_metrics(finance_values)
         except MCPUnavailableError as exc:
             finance = {"status": "unavailable", "reason": str(exc)}
         return {"case_id": state.case_id, "company_name": case.company_name, "website": str(case.website) if case.website else None, "sector": case.sector, "funding_stage": case.funding_stage, "funding_requested": case.funding_requested, "github_url": str(case.github_url) if case.github_url else None, "website_research": website, "github": github, "financial_inputs": finance_values, "finance_mcp": finance, "pitch_deck": {"status": "founder-provided", "text": case.pitch_deck_text} if case.pitch_deck_text else {"status": "unavailable", "reason": "No pitch deck supplied."}}
@@ -113,8 +113,26 @@ class DueDiligenceFlow:
             report.verified_evidence.append(Evidence(statement=f"Public GitHub repository metadata retrieved for {github.get('full_name') or case.github_url}.", status=EvidenceStatus.VERIFIED, source_name="GitHub", source_type="github_api", source_url=str(case.github_url) if case.github_url else None, confidence=95))
         if case.pitch_deck_text:
             report.founder_provided_claims.append(Evidence(statement="Pitch deck text was supplied for this case and is treated as founder-provided evidence.", status=EvidenceStatus.FOUNDER_PROVIDED, source_name="Uploaded pitch deck", source_type="pitch_deck", confidence=50))
+        # Scores are derived after the crew's evidence is classified. The
+        # scoring module owns all numeric decisions and ignores model scores.
+        context["report_evidence"] = [
+            item.model_dump(mode="json")
+            for group in (
+                report.verified_evidence,
+                report.founder_provided_claims,
+                report.unverified_claims,
+                report.conflicting_evidence,
+                report.unavailable_evidence,
+            )
+            for item in group
+        ]
         breakdowns = calculate_score_breakdowns(context)
-        recommendation, risk, reason, overall, confidence = recommendation_for(breakdowns, len(report.unavailable_evidence))
+        recommendation, risk, reason, overall, confidence = recommendation_for(
+            breakdowns,
+            len(report.unavailable_evidence),
+            conflicting_count=len(report.conflicting_evidence),
+            major_red_flags=len(report.red_flags),
+        )
         report.score_breakdowns = breakdowns
         report.market_score, report.technical_score, report.traction_score, report.financial_score, report.team_score = [item.score for item in breakdowns]
         report.overall_score, report.risk_level, report.confidence_level = overall, risk, confidence
