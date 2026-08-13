@@ -1,139 +1,323 @@
 # DealLens AI
 
-**Multi-Agent Startup Due-Diligence & Venture Intelligence Platform.** DealLens structures company, market, technical, financial, and risk signals into an evidence-labelled investment memo. It is decision support, not an investment guarantee.
+## Multi-Agent Startup Due-Diligence & Venture Intelligence Platform
+
+DealLens AI is a multi-agent venture-intelligence platform for early-stage startup due diligence. It researches public company and technical signals, evaluates supplied financial inputs, identifies evidence gaps and risks, and produces an auditable investment memo for decision support.
+
+Built with CrewAI, MCP, OpenAI, FastAPI, Next.js, Supabase PostgreSQL, durable worker execution, and deterministic scoring.
+
+> Decision support only — DealLens AI does not replace professional investment, legal, or financial judgment.
+
+## The problem
+
+Startup diligence requires information from fragmented sources: company websites, GitHub repositories, pitch decks, financial inputs, and public market material. Manual collection is slow, and the strength of available evidence is often unclear.
+
+DealLens coordinates specialized AI agents and deterministic tools around a structured, evidence-labelled workflow so that the resulting analysis is easier to inspect and revisit.
+
+## How it works
+
+```text
+Startup input
+  -> case and PostgreSQL job are created
+  -> Railway worker claims the job
+  -> CrewAI specialists research and reason over supplied/public evidence
+  -> Finance MCP performs deterministic calculations
+  -> evidence is classified
+  -> deterministic scoring calculates category and overall scores
+  -> recommendation and report are persisted
+  -> frontend displays the report and PDF memo
+```
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  UI[Next.js investor interface] --> API[FastAPI API]
-  API --> Flow[CrewAI Flow state]
-  Flow --> Agents[Company · Market · Technical · Financial]
-  Agents --> MCP[MCP client layer]
-  MCP --> Finance[DealLens Finance MCP]
-  Flow --> Risk[Risk Committee]
-  Risk --> Memo[Investment Memo / Pydantic report]
+  User[Investor / operator] --> FE[Vercel<br/>Next.js frontend]
+  FE --> API[Render<br/>FastAPI API]
+  API --> DB[(Supabase PostgreSQL<br/>cases, jobs, reports, evidence)]
+  DB --> Worker[Railway<br/>persistent worker]
+  Worker --> Flow[CrewAI diligence flow]
+  Flow --> Agents[Company · Market · Technical<br/>Financial · Risk · Memo agents]
+  Agents --> OpenAI[OpenAI]
+  Agents --> Web[Public website research]
+  Agents --> GitHub[GitHub API research]
+  Agents --> MCP[Finance MCP server]
+  Flow --> DB
+  DB --> API
+  API --> Report[Frontend report / PDF memo]
 ```
 
-## Production worker architecture
+## Multi-agent system
 
-```mermaid
-flowchart LR
-  UI[Next.js frontend] --> API[FastAPI API]
-  API --> DB[(Supabase PostgreSQL)]
-  Worker[Render worker web service] --> DB
-  Worker --> AI[CrewAI / OpenAI / MCP / GitHub]
-  UI -->|polls| API
-```
+CrewAI orchestrates role-based agents in a bounded sequential diligence flow.
 
-The API persists a case and queued job, then returns immediately. The worker claims one PostgreSQL job atomically and performs the long-running workflow. Report/PDF reads use stored report data and never rerun AI.
+- **Company Intelligence Agent** — reviews product, company context, and public positioning while separating evidence quality/status.
+- **Market & Competition Agent** — synthesizes market context, competitors, differentiation, and market risks from available evidence.
+- **Technical Due-Diligence Agent** — assesses public GitHub metadata, commits, contributors, releases, repository maturity, and technical signals.
+- **Financial Analysis Agent** — interprets deterministic Finance MCP results; it does not substitute LLM arithmetic when inputs are available.
+- **Risk Committee Agent** — highlights contradictions, uncertainty, missing evidence, and confidence constraints.
+- **Investment Memo Agent** — produces the final structured diligence report.
 
-### Free-tier Render deployment
+## Model Context Protocol (MCP)
+
+DealLens includes a custom Finance MCP server for deterministic finance utilities:
+
+- `calculate_runway`
+- `calculate_monthly_burn`
+- `calculate_arpu`
+- `calculate_revenue_growth`
+- `calculate_customer_concentration`
+- `calculate_basic_unit_economics`
 
 ```text
-Vercel
-  -> Next.js frontend
-Render Web Service #1
-  -> FastAPI API (`uvicorn backend.main:app --host 0.0.0.0 --port $PORT`)
-Render Web Service #2
-  -> `python -m backend.worker_service`
-  -> lightweight HTTP health server plus the durable PostgreSQL worker loop
-Supabase PostgreSQL
-  -> cases / jobs / reports / evidence
+CrewAI Financial Agent -> MCP client -> Finance MCP server -> deterministic result
 ```
 
-The second Render **Web Service** is a free-tier workaround for platforms that require every service to bind to `$PORT`. It exposes only `GET /` and `GET /health`, returning `{"status":"ok","service":"deallens-worker"}`. Its worker thread reuses `backend.worker.run_worker`, including atomic `FOR UPDATE SKIP LOCKED` claims, retries, report persistence, and stale-job recovery; it does not implement a second queue.
+The Finance MCP server performs arithmetic locally and does not require an OpenAI key.
 
-Set `PORT` only when running locally (the local default is `10000`), then run:
+## Evidence taxonomy
+
+Every report distinguishes the quality and provenance of evidence:
+
+- `verified`
+- `supported`
+- `public_company_claim`
+- `founder-provided`
+- `unverified`
+- `conflicting`
+- `unavailable`
+
+For example, a statement from a startup website is a `public_company_claim`, not automatically verified. This distinction keeps recommendations grounded in what is actually known.
+
+## Hybrid AI + deterministic scoring
+
+DealLens does not ask an LLM to invent final scores. AI agents research and interpret evidence; the deterministic scoring engine converts structured, inspectable facts into auditable scores.
+
+| Category | Weight | Examples of evidence-sensitive signals |
+| --- | ---: | --- |
+| Market | 20% | positioning, independent market/competitor evidence, differentiation |
+| Technology | 20% | commit recency/depth, contributor tiers, releases, maturity, bounded adoption signals |
+| Traction | 25% | founder inputs, public adoption, independently supported commercial/growth evidence |
+| Financials | 20% | revenue, burn, runway, growth, ARPU, concentration, cash flow |
+| Team | 15% | named people, verifiable backgrounds, experience, complementarity |
+
+Scores and confidence are separate: a strong technical score can still carry low confidence when evidence is incomplete. GitHub adoption signals use bounded/logarithmic scaling so very large projects do not dominate. Missing financial data earns no financial-quality points, and availability of the Finance MCP alone never increases the financial score.
+
+## Recommendation system
+
+Possible recommendation outcomes are:
+
+- Proceed to Partner Review
+- Proceed with Conditions
+- Additional Verification Required
+- High Risk / Hold
+
+Recommendations consider weighted scores alongside confidence, critical evidence gaps, red flags, and conflicting evidence. They are decision support only.
+
+## Durable job architecture
+
+Long-running diligence never executes inside the API request:
+
+```text
+POST /api/cases -> persist case -> persist queued job -> return case_id
+Railway worker -> atomically claim job -> run CrewAI -> persist stages and report
+```
+
+PostgreSQL job claims use `FOR UPDATE SKIP LOCKED` to prevent duplicate execution. The worker uses bounded retry attempts, stale-job recovery, safe server-side exception logging, and durable status updates. Historical reports are read from storage and never rerun AI.
+
+## Persistence
+
+Supabase PostgreSQL stores durable history in:
+
+- `deallens_cases`
+- `deallens_reports`
+- `deallens_score_breakdowns`
+- `deallens_evidence`
+- `deallens_report_lists`
+- `deallens_jobs`
+- `deallens_schema_migrations`
+
+Migrations are version tracked. The cache is only a temporary API optimization; PostgreSQL is the source of truth for cases, jobs, reports, and evidence.
+
+## Features
+
+- Multi-agent due diligence with real OpenAI/CrewAI execution
+- Public website and GitHub research
+- Optional pitch-deck extraction
+- Deterministic financial analysis through MCP
+- Structured evidence classification and auditable scorecards
+- Risk synthesis, investor questions, and recommendation rationale
+- Durable case history, retries, and interruption recovery
+- Downloadable PDF investment memos
+- Deployed frontend, API, worker, and PostgreSQL persistence
+
+## Screenshots
+
+Screenshots are not yet checked into this repository. Add them under `assets/screenshots/` when available:
+
+```text
+TODO: assets/screenshots/landing.png
+TODO: assets/screenshots/new-case.png
+TODO: assets/screenshots/analysis.png
+TODO: assets/screenshots/report.png
+TODO: assets/screenshots/scorecards.png
+TODO: assets/screenshots/evidence.png
+TODO: assets/screenshots/history.png
+TODO: assets/screenshots/memo-pdf.png
+```
+
+## Tech stack
+
+| Area | Technology |
+| --- | --- |
+| Frontend | Next.js, React, TypeScript, Tailwind CSS, Framer Motion, Lucide |
+| Backend | Python 3.13, FastAPI, Pydantic, psycopg |
+| Agentic AI | CrewAI, OpenAI, MCP |
+| Data | Supabase PostgreSQL |
+| External research | GitHub API, public website research |
+| PDF | ReportLab |
+| Deployment | Vercel, Render, Railway, Supabase |
+
+## Repository structure
+
+```text
+backend/
+  api/             # FastAPI routes
+  crew/            # CrewAI agents, tasks, flow, schema checks
+  mcp/             # Finance MCP client and server
+  persistence/     # PostgreSQL repositories and migrations
+  schemas/         # Pydantic models
+  services/        # research, scoring, PDF, lifecycle services
+  tests/           # backend tests
+  worker.py        # persistent PostgreSQL worker
+frontend/
+  app/             # Next.js routes and UI
+  lib/             # API client/types
+```
+
+## Local setup (Windows / PowerShell)
+
+CrewAI requires Python 3.10–3.13; this project uses Python 3.13.
 
 ```powershell
-$env:PORT="10000"
-.\.venv\Scripts\python.exe -m backend.worker_service
+git clone <your-repository-url>
+cd DealLens_AI
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+
+cd frontend
+npm install
 ```
 
-Configure the worker service with the same backend-only environment variables as the API: `DATABASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `APP_ENV`, `WORKER_POLL_SECONDS`, `JOB_STALE_MINUTES`, `JOB_MAX_ATTEMPTS`, `OPENAI_TIMEOUT_SECONDS`, `OPENAI_MAX_RETRIES`, `DEALLENS_CACHE_TTL_SECONDS`, `DEALLENS_MAX_PITCH_DECK_MB`, and optionally `GITHUB_TOKEN`. Do not expose them to Vercel.
-
-On SIGTERM/Ctrl+C, Uvicorn closes the HTTP service and the lifespan handler requests that polling stop. It never marks an in-progress job completed; an interrupted active job remains durable and is handled by existing stale-job recovery after its lease timeout. A free Render web service can still sleep or be restarted, so queue latency and recovery time are not suitable for low-latency or always-on production workloads. Multiple accidental worker instances are safe with respect to duplicate execution because PostgreSQL job claiming uses row locking and `SKIP LOCKED`.
-
-CrewAI owns specialist-agent orchestration and bounded flow routing. MCP owns reusable integrations: deterministic finance tools, diligence frameworks as resources, and an investment-committee memo prompt. The flow allows at most one targeted retry before risk synthesis.
-
-## Deterministic scoring
-
-CrewAI classifies evidence and writes the narrative; it does not set the final numeric scores. `backend/services/scoring.py` converts inspectable research facts and classified evidence into bounded 0–100 scorecards. Overall category weights are Market **20%**, Technology **20%**, Traction **25%**, Financials **20%**, and Team **15%**.
-
-Technology uses repository recency, recent commit depth, contributor ranges, releases, repository age, logarithmically scaled stars/forks, language, license, and a contextual issue flag. Market treats a company website as limited positioning evidence and prioritizes independent market and competitor signals. Traction distinguishes founder-supplied revenue/customers, capped public adoption, and independently supported commercial or growth evidence. Financials score only actual revenue, burn, cash/runway, growth, ARPU, concentration, and cash-flow inputs: Finance MCP availability alone earns **zero** points. Team separates public presence, named people, independently verifiable backgrounds, experience, and complementarity.
-
-Each scorecard reports factor points/max points, deductions, evidence notes, and a separate confidence level based on coverage and independent support. Recommendation combines the weighted score with confidence, unavailable/conflicting evidence, red flags, and critical gaps in traction, financials, and team—not score alone. Historical persisted reports continue to load because the new factor maximum is optional-compatible.
-
-## OpenAI configuration
-
-All CrewAI agents use the same cost-efficient model, configured centrally in `backend/config.py`. The API key is read **only** from the backend process environment or local `.env`; it is never included in frontend code or API responses.
-
-```bash
-copy .env.example .env
-# Edit .env and add OPENAI_API_KEY. Do not commit this file.
-```
+Create a local backend `.env` from `.env.example`. Never commit `.env`.
 
 ```dotenv
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4.1-mini
+DATABASE_URL=
+APP_ENV=development
+FRONTEND_ORIGIN=http://localhost:3000
+GITHUB_TOKEN=
+WORKER_POLL_SECONDS=5
+JOB_STALE_MINUTES=15
+JOB_MAX_ATTEMPTS=2
 ```
 
-If `OPENAI_API_KEY` is missing, `POST /api/cases` returns a clear `503 OPENAI_CONFIGURATION_ERROR`; it does not substitute fake AI output. The dashboard's `/report` is a separately and visibly labelled static demo.
+`GITHUB_TOKEN` is optional but can reduce public GitHub API rate-limit pressure. All credentials remain backend-only.
 
-## Agents
+### Database migrations
 
-- Company Intelligence: public claims, product, team and traction evidence.
-- Market & Competition: market, competitors, substitutes and moat signals.
-- Technical Due Diligence: public GitHub metadata only.
-- Financial Analysis: interprets deterministic MCP metrics.
-- Risk Committee: challenges gaps and contradictions.
-- Investment Memo: structured decision-support output.
+From the repository root:
 
-## Finance MCP
-
-The custom server (`backend/mcp/servers/finance_server.py`) provides tools: `calculate_runway`, `calculate_monthly_burn`, `calculate_arpu`, `calculate_revenue_growth`, `calculate_customer_concentration`, and `calculate_basic_unit_economics`.
-
-Resources: `deallens://frameworks/preseed`, `deallens://frameworks/saas-metrics`, and `deallens://risk-policy`. Prompt: `investment_committee_memo`.
-
-## API
-
-- `GET /api/health` — safe configuration status (no secret values)
-- `GET /api/mcp/discovery` — server tools, resources and prompts
-- `POST /api/cases` — queues a real CrewAI case; requires OpenAI config
-- `POST /api/cases/with-pitch-deck` — accepts JSON and a size-limited PDF deck; text is founder-provided evidence
-- `GET /api/cases/{case_id}/status` — safe stage/progress metadata only
-- `GET /api/cases/{case_id}/report` — real structured result when complete
-- `GET /api/cases/{case_id}/memo.pdf` — exported real investment memo
-- `GET /api/cases/demo` — explicitly labelled static demo report
-
-## Run locally
-
-Backend (from repository root):
-
-```bash
-# CrewAI currently supports Python 3.10–3.13. Use a 3.13 environment.
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r backend/requirements.txt
-uvicorn backend.main:app --reload --port 8000
-pytest backend/tests -q
+```powershell
+.\.venv\Scripts\python.exe -m backend.persistence.migrate
 ```
 
-Frontend:
+The migration runner records applied versions in `deallens_schema_migrations`.
 
-```bash
+### Run locally
+
+Use three terminals from the repository root.
+
+```powershell
+# Terminal 1 — API
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --port 8000
+
+# Terminal 2 — worker
+.\.venv\Scripts\python.exe -m backend.worker
+
+# Terminal 3 — frontend
 cd frontend
-npm install
 npm run dev
+```
+
+Open `http://localhost:3000`.
+
+## Production deployment
+
+- **Frontend:** Vercel
+- **API:** Render Web Service
+- **Worker:** Railway persistent service (`python -m backend.worker`)
+- **Database:** Supabase PostgreSQL
+
+Configure the API and worker with the same required backend environment variables. Do not expose backend credentials in Vercel or browser code.
+
+## API endpoints
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/cases` | Create and queue a diligence case |
+| `POST` | `/api/cases/with-pitch-deck` | Create and queue a case with an optional PDF deck |
+| `GET` | `/api/cases` | List persisted cases |
+| `GET` | `/api/cases/{case_id}` | Retrieve case input/status summary |
+| `GET` | `/api/cases/{case_id}/status` | Retrieve live safe status metadata |
+| `GET` | `/api/cases/{case_id}/report` | Retrieve a completed report |
+| `POST` | `/api/cases/{case_id}/retry` | Create a new queued retry case |
+| `GET` | `/api/cases/{case_id}/memo.pdf` | Download the PDF investment memo |
+| `GET` | `/api/health` | Safe health/configuration status |
+| `GET` | `/api/ready` | Database readiness check |
+
+## Testing
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest backend\tests -q
+
+cd frontend
 npm run typecheck
 npm run build
 ```
 
-## Evidence, security, and current MVP limits
+The W&B regression fix was verified with **51 backend tests passed** and frontend typechecking. Production builds target Next.js 15.5.18 and have completed successfully in the deployed build environment.
 
-Evidence is classified as verified, supported, founder-provided, unverified, conflicting, or unavailable. GitHub lookup validates public repository URLs, fetches metadata/activity/contributors/releases when available, uses a TTL cache, and has strict retry/backoff behavior. Public website research is a low-friction optional source; inaccessible sites become unavailable evidence. API keys remain server-side; `.env` is git-ignored. Jobs, cases, reports, score breakdowns, and evidence are durably stored in PostgreSQL.
+Public-company regression cases include Firecrawl, Langfuse, and Weights & Biases. They exercise public research, GitHub analysis, worker queue execution, evidence classification, deterministic scoring, persistence, and PDF export without publishing private data.
 
-## Roadmap
+## Security and reliability
 
-Add persistent case storage, approved search MCP connectors, authenticated GitHub rate-limit handling, and a deployment pipeline.
+- Secrets are backend-only; `.env` is ignored by Git.
+- Database queries use parameters.
+- CORS is configured for the frontend origin.
+- Retries are bounded and stale jobs are recoverable.
+- User-facing failures remain safe; detailed exception tracebacks are server-side only.
+- PostgreSQL locking protects against duplicate worker execution.
+- Loading a historical report does not invoke AI again.
+
+## Known limitations
+
+- Market, team, and commercial confidence depend on available public evidence.
+- Private financial diligence requires founder-provided inputs.
+- External API limits can reduce available evidence.
+- Recommendations are decision support, not investment advice.
+- Richer independent data providers could improve future confidence and coverage.
+
+## Future improvements
+
+- Independent market and competitor datasets
+- Authenticated/private data-room connectors
+- Advanced observability
+- Organization and user authentication
+- Portfolio-level analytics and stronger benchmarking
+
+## Disclaimer
+
+DealLens AI provides decision-support analysis only. It is not financial, legal, or investment advice and does not guarantee investment outcomes.
